@@ -1,176 +1,123 @@
 /*
- * Copyright 2020 Stripe, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Stripe × Firebase “Athlete Donations” – shared TypeScript models.
+ * --------------------------------------------------------------------
+ *  • Uses the athletes collection as the single source-of-truth.
+ *  • Stores one Connect account per athlete (fan → athlete donations).
+ *  • No “token” or credits logic – pure currency flows.
  */
 
 import Stripe from 'stripe';
 
+/* ──────────────────────────────────────────────────────────────────
+ *  Athletes (top-level Firestore collection: athletes/{uid})
+ * ----------------------------------------------------------------*/
+
+export interface AthleteDoc {
+  /** Firebase Auth UID for the athlete (also the doc ID). */
+  uid: string;
+
+  /** Stripe Connect account ID (looks like acct_123…). */
+  connectAccountId: string | null;
+
+  /** Whether Stripe has approved the account for charging fans. */
+  chargesEnabled: boolean;
+
+  /** Whether automatic payouts to the athlete are enabled. */
+  payoutsEnabled: boolean;
+
+  /** ISO 2-letter country code – we’re US-only for phase 1. */
+  country: 'US';
+
+  /** Timestamp the Connect account was first created. */
+  createdAt: FirebaseFirestore.Timestamp;
+
+  /** Optional: latest Stripe requirements block for quick debug. */
+  requirements?: Stripe.Account.Requirements;
+
+  /* === any additional athlete profile fields you already use === */
+  fullName?: string;
+  schoolName?: string;
+  sports?: string[];
+  [prop: string]: any; // allow future expansion
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ *  Customer objects (fans) held in Stripe – minimal metadata only
+ * ----------------------------------------------------------------*/
 export interface CustomerData {
   metadata: {
+    /** Firebase UID of the FAN (not the athlete). */
     firebaseUID: string;
+    /** Firebase UID of the ATHLETE this fan paid (for traceability). */
+    athleteUID: string;
   };
   email?: string;
   phone?: string;
 }
 
+/* ──────────────────────────────────────────────────────────────────
+ *  One-time donation “Price” objects – kept for completeness
+ * ----------------------------------------------------------------*/
 export interface Price {
-  /**
-   * Whether the price can be used for new purchases.
-   */
   active: boolean;
-  currency: string;
-  unit_amount: number;
-  /**
-   * A brief description of the price.
-   */
+  currency: string;          // e.g. 'usd'
+  unit_amount: number;       // in smallest currency unit – cents for USD
   description: string | null;
-  /**
-   * One of `one_time` or `recurring` depending on whether the price is for a one-time purchase or a recurring (subscription) purchase.
-   */
-  type: 'one_time' | 'recurring';
-  /**
-   * The frequency at which a subscription is billed. One of `day`, `week`, `month` or `year`.
-   */
-  interval: 'day' | 'month' | 'week' | 'year' | null;
-  /**
-   * The number of intervals (specified in the `interval` attribute) between subscription billings. For example, `interval=month` and `interval_count=3` bills every 3 months.
-   */
-  interval_count: number | null;
-  /**
-   * Default number of trial days when subscribing a customer to this price using [`trial_from_plan=true`](https://stripe.com/docs/api#create_subscription-trial_from_plan).
-   */
-  trial_period_days: number | null;
-  /**
-   * Any additional properties
-   */
-  [propName: string]: any;
+  type: 'one_time';          // donations are one-off, not recurring
+  interval: null;            // always null for one-time
+  interval_count: null;      // always null for one-time
+  trial_period_days: null;   // not used
+  [prop: string]: any;
 }
 
+/* ──────────────────────────────────────────────────────────────────
+ *  Donation “Product” wrapper – one product per athlete
+ * ----------------------------------------------------------------*/
 export interface Product {
-  /**
-   * Whether the product is currently available for purchase.
-   */
   active: boolean;
-  /**
-   * The product's name, meant to be displayable to the customer. Whenever this product is sold via a subscription, name will show up on associated invoice line item descriptions.
-   */
+  /** Visible name shown in Checkout / Payment Sheet (e.g. “Donate to …”). */
   name: string;
-  /**
-   * The product's description, meant to be displayable to the customer. Use this field to optionally store a long form explanation of the product being sold for your own rendering purposes.
-   */
   description: string | null;
-  /**
-   * The role that will be assigned to the user if they are subscribed to this plan.
-   */
-  role: string | null;
-  /**
-   * A list of up to 8 URLs of images for this product, meant to be displayable to the customer.
-   */
-  images: Array<string>;
-  /**
-   * A list of Prices for this billing product.
-   */
-  prices?: Array<Price>;
-  /**
-   * Any additional properties
-   */
-  [propName: string]: any;
+  /** Not used for donations – keep null. */
+  role: null;
+  images: string[];          // athlete head-shot etc.
+  prices?: Price[];          // usually exactly one
+  [prop: string]: any;
 }
 
+/* ──────────────────────────────────────────────────────────────────
+ *  TaxRate passthrough (un-changed) – included for completeness
+ * ----------------------------------------------------------------*/
 export interface TaxRate extends Stripe.TaxRate {
-  /**
-   * Any additional properties
-   */
-  [propName: string]: any;
+  [prop: string]: any;
 }
 
-export interface Subscription {
-  id?: string;
-  /**
-   * Set of key-value pairs that you can attach to an object.
-   * This can be useful for storing additional information about the object in a structured format.
-   */
-  metadata: {
-    [name: string]: string;
-  };
-  stripeLink: string;
-  role: string | null;
-  quantity: number;
-  items: Stripe.SubscriptionItem[];
-  /**
-   * Firestore reference to the product doc for this Subscription.
-   */
-  product: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
-  /**
-   * Firestore reference to the price for this Subscription.
-   */
-  price: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
-  /**
-   * Array of price references. If you prvoide multiple recurring prices to the checkout session via the `line_items` parameter,
-   * this array will hold the references for all recurring prices for this subscription. `price === prices[0]`.
-   */
-  prices: Array<
-    FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>
-  >;
-  payment_method?: string;
-  latest_invoice?: string;
-  /**
-   * The status of the subscription object
-   */
-  status:
-    | 'active'
-    | 'canceled'
-    | 'incomplete'
-    | 'incomplete_expired'
-    | 'past_due'
-    | 'paused'
-    | 'trialing'
-    | 'unpaid';
-  /**
-   * If true the subscription has been canceled by the user and will be deleted at the end of the billing period.
-   */
-  cancel_at_period_end: boolean;
-  /**
-   * Time at which the object was created.
-   */
+/* ──────────────────────────────────────────────────────────────────
+ *  Record of an individual donation (stored under athletes/{uid})
+ * ----------------------------------------------------------------*/
+export interface Donation {
+  /** Stripe PaymentIntent / Charge ID. */
+  id: string;
+
+  /** Firestore reference back to the donating fan’s user doc (optional). */
+  fanRef?: FirebaseFirestore.DocumentReference;
+
+  /** Currency / amount metadata */
+  amount: number;
+  currency: string;
+
+  /** UTC timestamp of when the payment succeeded. */
   created: FirebaseFirestore.Timestamp;
-  /**
-   * Start of the current period that the subscription has been invoiced for.
-   */
-  current_period_start: FirebaseFirestore.Timestamp;
-  /**
-   * End of the current period that the subscription has been invoiced for. At the end of this period, a new invoice will be created.
-   */
-  current_period_end: FirebaseFirestore.Timestamp;
-  /**
-   * If the subscription has ended, the timestamp of the date the subscription ended.
-   */
-  ended_at: FirebaseFirestore.Timestamp | null;
-  /**
-   * A date in the future at which the subscription will automatically get canceled.
-   */
-  cancel_at: FirebaseFirestore.Timestamp | null;
-  /**
-   * If the subscription has been canceled, the date of that cancellation. If the subscription was canceled with `cancel_at_period_end`, `canceled_at` will still reflect the date of the initial cancellation request, not the end of the subscription period when the subscription is automatically moved to a canceled state.
-   */
-  canceled_at: FirebaseFirestore.Timestamp | null;
-  /**
-   * If the subscription has a trial, the beginning of that trial.
-   */
-  trial_start: FirebaseFirestore.Timestamp | null;
-  /**
-   * If the subscription has a trial, the end of that trial.
-   */
-  trial_end: FirebaseFirestore.Timestamp | null;
+
+  /** Stripe status – should be “succeeded” for normal donations. */
+  status: Stripe.PaymentIntent.Status;
+
+  /** Link to the Stripe dashboard for quick CSR look-ups. */
+  stripeLink: string;
+
+  /** True once funds are included in a payout. */
+  includedInPayout: boolean;
+
+  /* any extra fields you find useful */
+  [prop: string]: any;
 }
