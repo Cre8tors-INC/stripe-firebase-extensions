@@ -1,19 +1,3 @@
-/*
- * Copyright 2020 Stripe, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions/v1';
 import Stripe from 'stripe';
@@ -29,13 +13,13 @@ import {
   manageSubscriptionStatusChange,
 } from '../utils';
 
+const db = admin.firestore();
+
 export const handleWebhookEvents = async (
   req: functions.https.Request,
   resp: functions.Response,
 ) => {
-  // Initialize event channel after Firebase Admin is ready
   const eventChannel = getEventChannel();
-
   const relevantEvents = new Set([
     'product.created',
     'product.updated',
@@ -61,18 +45,13 @@ export const handleWebhookEvents = async (
     'payment_intent.succeeded',
     'payment_intent.canceled',
     'payment_intent.payment_failed',
+    'account.updated',
   ]);
   let event: Stripe.Event;
-
-  // Instead of getting the `Stripe.Event`
-  // object directly from `req.body`,
-  // use the Stripe webhooks API to make sure
-  // this webhook call came from a trusted source
   try {
     event = stripe.webhooks.constructEvent(
       req.rawBody,
-      // @ts-ignore
-      req.headers['stripe-signature'],
+      req.headers['stripe-signature'] as string,
       config.stripeWebhookSecret,
     );
   } catch (error) {
@@ -105,7 +84,7 @@ export const handleWebhookEvents = async (
           break;
         case 'customer.subscription.created':
         case 'customer.subscription.updated':
-        case 'customer.subscription.deleted':
+        case 'customer.subscription.deleted': {
           const subscription = event.data.object as Stripe.Subscription;
           await manageSubscriptionStatusChange(
             subscription.id,
@@ -113,9 +92,10 @@ export const handleWebhookEvents = async (
             event.type === 'customer.subscription.created',
           );
           break;
+        }
         case 'checkout.session.completed':
         case 'checkout.session.async_payment_succeeded':
-        case 'checkout.session.async_payment_failed':
+        case 'checkout.session.async_payment_failed': {
           const checkoutSession = event.data.object as Stripe.Checkout.Session;
           if (checkoutSession.mode === 'subscription') {
             const subscriptionId = checkoutSession.subscription as string;
@@ -130,37 +110,75 @@ export const handleWebhookEvents = async (
               await stripe.paymentIntents.retrieve(paymentIntentId);
             await insertPaymentRecord(paymentIntent, checkoutSession);
           }
+          if (checkoutSession.metadata?.athleteUid) {
+            const athleteRef = db
+              .collection('athletes')
+              .doc(checkoutSession.metadata.athleteUid);
+            const athleteData = (await athleteRef.get()).data() as {
+              stripeAccountId?: string;
+            } | null;
+            if (
+              athleteData?.stripeAccountId &&
+              checkoutSession.amount_total &&
+              checkoutSession.currency
+            ) {
+              await stripe.transfers.create({
+                amount: Math.round(checkoutSession.amount_total * 0.9),
+                currency: checkoutSession.currency,
+                destination: athleteData.stripeAccountId,
+                metadata: { checkoutSession: checkoutSession.id },
+              });
+            }
+          }
           if (checkoutSession.tax_id_collection?.enabled) {
-            const customersSnap = await admin
-              .firestore()
+            const customersSnap = await db
               .collection(config.customersCollectionPath)
               .where('stripeId', '==', checkoutSession.customer as string)
               .get();
             if (customersSnap.size === 1) {
               customersSnap.docs[0].ref.set(
-                // @ts-ignore
-                checkoutSession.customer_details,
+                checkoutSession.customer_details as any,
                 { merge: true },
               );
             }
           }
           break;
+        }
         case 'invoice.paid':
         case 'invoice.payment_succeeded':
         case 'invoice.payment_failed':
         case 'invoice.upcoming':
         case 'invoice.marked_uncollectible':
-        case 'invoice.payment_action_required':
+        case 'invoice.payment_action_required': {
           const invoice = event.data.object as Stripe.Invoice;
           await insertInvoiceRecord(invoice);
           break;
+        }
         case 'payment_intent.processing':
         case 'payment_intent.succeeded':
         case 'payment_intent.canceled':
-        case 'payment_intent.payment_failed':
+        case 'payment_intent.payment_failed': {
           const paymentIntent = event.data.object as Stripe.PaymentIntent;
           await insertPaymentRecord(paymentIntent);
           break;
+        }
+        case 'account.updated': {
+          const acct = event.data.object as Stripe.Account;
+          if (acct.metadata?.firebaseUID) {
+            await db
+              .collection('athletes')
+              .doc(acct.metadata.firebaseUID)
+              .set(
+                {
+                  payoutsEnabled: acct.payouts_enabled,
+                  chargesEnabled: acct.charges_enabled,
+                  requirements: acct.requirements,
+                },
+                { merge: true },
+              );
+          }
+          break;
+        }
         default:
           logs.webhookHandlerError(
             new Error('Unhandled relevant event!'),
@@ -186,6 +204,5 @@ export const handleWebhookEvents = async (
     }
   }
 
-  // Return a response to Stripe to acknowledge receipt of the event.
   resp.json({ received: true });
 };
