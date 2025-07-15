@@ -1,6 +1,7 @@
 import * as admin from 'firebase-admin';
 import * as functions from 'firebase-functions/v1';
 import Stripe from 'stripe';
+import { Timestamp } from 'firebase-admin/firestore';
 
 import config, { stripe, getEventChannel } from './config';
 import * as logs from './logs';
@@ -22,7 +23,6 @@ import { handleCheckoutSessionCreation } from './handlers/checkout-session-creat
    Export reusable HTTP / callable handlers FIRST
    (so other modules can import them without circular deps)
    ──────────────────────────────────────────────────────────── */
-export * from './handlers/checkoutHandler';
 export * from './handlers/athleteOnboard';
 
 /* ──────────────────────────────────────────────────────────── */
@@ -64,7 +64,7 @@ export const createPortalLink = functions.https.onCall(
       flow_data,
     } = data;
 
-    let customerRecord = (
+    let customerRecord: any = (
       await admin
         .firestore()
         .collection(config.customersCollectionPath)
@@ -79,6 +79,12 @@ export const createPortalLink = functions.https.onCall(
         email,
         phone: phoneNumber,
       });
+      if (!customerRecord) {
+        throw new functions.https.HttpsError(
+          'internal',
+          'Failed to create customer record',
+        );
+      }
     }
 
     const params: Stripe.BillingPortal.SessionCreateParams = {

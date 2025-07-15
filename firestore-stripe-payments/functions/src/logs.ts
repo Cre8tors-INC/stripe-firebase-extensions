@@ -115,3 +115,22 @@ export function webhookHandlerError(error: Error, id: string, type: string) {
     error.message,
   );
 }
+
+// Additional helpers for Connect account flows
+export const customerExists = (uid: string, accountId: string) => {
+  logger.log(`↪️ Reusing existing Connect account [${accountId}] for user [${uid}].`);
+};
+
+export const creatingConnectedAccount = (uid: string) => {
+  logger.log(`⚙️ Creating new Connect account for user [${uid}].`);
+};
+
+export const customerAndAccountCreated = (
+  uid: string,
+  accountId: string,
+  customerId: string,
+) => {
+  logger.log(
+    `✅Created Connect account [${accountId}] and customer [${customerId}] for user [${uid}].`,
+  );
+};

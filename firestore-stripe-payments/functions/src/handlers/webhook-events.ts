@@ -49,10 +49,12 @@ export const handleWebhookEvents = async (
   ]);
   let event: Stripe.Event;
   try {
+    const secret =
+      config.stripeWebhookSecret ?? functions.config().stripe.webhook_secret;
     event = stripe.webhooks.constructEvent(
       req.rawBody,
       req.headers['stripe-signature'] as string,
-      config.stripeWebhookSecret,
+      secret,
     );
   } catch (error) {
     logs.badWebhookSecret(error);

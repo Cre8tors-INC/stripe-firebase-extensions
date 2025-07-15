@@ -1,16 +1,22 @@
 import * as admin from 'firebase-admin';
-import { CustomerData, Product, Subscription, Price, TaxRate } from './interfaces';
+import {
+  CustomerData,
+  Product,
+  Subscription,
+  Price,
+  TaxRate,
+} from './interfaces';
 import * as logs from './logs';
 import config from './config';
 import { stripe } from './config';
 import Stripe from 'stripe';
-import { Timestamp } from 'firebase-admin/firestore';
+import { Timestamp, DocumentReference } from 'firebase-admin/firestore';
 
-export const prefixMetadata = (metadata: Record<string, any>) =>
-  Object.keys(metadata).reduce((prefixedMetadata: Record<string, any>, key) => {
-    prefixedMetadata[`stripe_metadata_${key}`] = (metadata as any)[key];
-    return prefixedMetadata;
-  }, {});
+export const prefixMetadata = <T extends Record<string, any>>(metadata: T) =>
+  Object.keys(metadata).reduce((prefixed, key) => {
+    (prefixed as Record<string, any>)[`stripe_metadata_${key}`] = metadata[key];
+    return prefixed;
+  }, {} as Record<string, any>);
 
 export const createProductRecord = async (product: Stripe.Product): Promise<void> => {
   const { firebaseRole, ...rawMetadata } = product.metadata;
@@ -26,6 +32,66 @@ export const createProductRecord = async (product: Stripe.Product): Promise<void
   };
   await admin.firestore().collection(config.productsCollectionPath).doc(product.id).set(productData, { merge: true });
   logs.firestoreDocCreated(config.productsCollectionPath, product.id);
+};
+
+export const createCustomerRecord = async ({
+  uid,
+  email,
+  phone,
+}: {
+  uid: string;
+  email?: string | null;
+  phone?: string | null;
+}) => {
+  logs.creatingCustomer(uid);
+  const customerData: CustomerData = { metadata: { firebaseUID: uid } };
+  if (email) customerData.email = email;
+  if (phone) customerData.phone = phone;
+  try {
+    const customer = await stripe.customers.create(customerData);
+    await admin
+      .firestore()
+      .collection(config.customersCollectionPath)
+      .doc(uid)
+      .set(
+        {
+          email: customer.email,
+          stripeId: customer.id,
+          stripeLink: `https://dashboard.stripe.com${customer.livemode ? '' : '/test'}/customers/${customer.id}`,
+        },
+        { merge: true },
+      );
+    logs.customerCreated(customer.id, customer.livemode);
+    return { email: customer.email, stripeId: customer.id };
+  } catch (error) {
+    logs.customerCreationError(error as Error, uid);
+    return null;
+  }
+};
+
+export const getOrCreateConnectAccount = async (
+  uid: string,
+  email?: string,
+): Promise<{ account: Stripe.Account; reused: boolean }> => {
+  const athleteRef = admin.firestore().collection('athletes').doc(uid);
+  const snap = await athleteRef.get();
+  const { connectAccountId } = (snap.data() as any) || {};
+  if (connectAccountId) {
+    logs.customerExists(uid, connectAccountId);
+    const account = await stripe.accounts.retrieve(connectAccountId);
+    return { account, reused: true };
+  }
+  logs.creatingConnectedAccount(uid);
+  const account = await stripe.accounts.create({
+    type: 'standard',
+    email,
+    business_type: 'individual',
+    capabilities: { transfers: { requested: true } },
+    metadata: { firebaseUID: uid },
+  });
+  await athleteRef.set({ connectAccountId: account.id }, { merge: true });
+  logs.customerAndAccountCreated(uid, account.id, account.id);
+  return { account, reused: false };
 };
 
 export const createCustomerAndAccountRecord = async ({
@@ -69,7 +135,7 @@ export const createCustomerAndAccountRecord = async ({
         email: customer.email,
         stripeId: customer.id,
         stripeAccountId: account.id,
-        stripeLink: `https://dashboard.stripe.com${account.livemode ? '' : '/test'}/connect/accounts/${account.id}`,
+        stripeLink: `https://dashboard.stripe.com/test/connect/accounts/${account.id}`,
       },
       { merge: true },
     );
@@ -80,7 +146,11 @@ export const createCustomerAndAccountRecord = async ({
 const copyBillingDetailsToCustomer = async (payment_method: Stripe.PaymentMethod): Promise<void> => {
   const customer = payment_method.customer as string;
   const { name, phone, address } = payment_method.billing_details;
-  await stripe.customers.update(customer, { name, phone, address });
+  await stripe.customers.update(customer, {
+    name: name ?? undefined,
+    phone: phone ?? undefined,
+    address: address as Stripe.AddressParam | undefined,
+  });
 };
 
 export const manageSubscriptionStatusChange = async (
@@ -93,7 +163,7 @@ export const manageSubscriptionStatusChange = async (
   const uid = customersSnap.docs[0].id;
   const subscription = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['default_payment_method', 'items.data.price.product'] });
   const price: Stripe.Price = subscription.items.data[0].price;
-  const prices: FirebaseFirestore.DocumentReference[] = [];
+  const prices: DocumentReference[] = [];
   for (const item of subscription.items.data) {
     prices.push(
       admin
@@ -157,7 +227,7 @@ export const insertPriceRecord = async (price: Stripe.Price): Promise<void> => {
     tiers: (price as any).tiers ?? null,
     currency: price.currency,
     description: price.nickname,
-    type: price.type,
+    type: price.type as 'one_time' | 'recurring',
     unit_amount: (price as any).unit_amount,
     recurring: price.recurring,
     interval: price.recurring?.interval ?? null,
@@ -190,7 +260,7 @@ export const insertInvoiceRecord = async (invoice: Stripe.Invoice) => {
     .collection('invoices')
     .doc(invoice.id)
     .set(invoice as any);
-  const prices: FirebaseFirestore.DocumentReference[] = [];
+  const prices: DocumentReference[] = [];
   for (const item of invoice.lines.data) {
     prices.push(
       admin
@@ -211,7 +281,7 @@ export const insertPaymentRecord = async (payment: Stripe.PaymentIntent, checkou
   if (customersSnap.size !== 1) throw new Error('User not found!');
   if (checkoutSession) {
     const lineItems = await stripe.checkout.sessions.listLineItems(checkoutSession.id);
-    const prices: FirebaseFirestore.DocumentReference[] = [];
+    const prices: DocumentReference[] = [];
     for (const item of lineItems.data) {
       prices.push(
         admin
