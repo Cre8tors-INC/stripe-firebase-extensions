@@ -70,6 +70,11 @@ const config: ExtensionConfig = {
   frontendOrigin: process.env.FRONTEND_ORIGIN,
 };
 
+export const CONNECT_REFRESH_URL =
+  config.frontendOrigin?.replace(/\/$/, '') + '/onboarding/refresh';
+export const CONNECT_RETURN_URL =
+  config.frontendOrigin?.replace(/\/$/, '') + '/onboarding/return';
+
 export const apiVersion = '2022-11-15';
 
 /**
